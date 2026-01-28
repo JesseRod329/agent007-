@@ -142,7 +142,7 @@ export default function AgentsPage() {
   const [realAgents, setRealAgents] = useState<any[]>([]);
 
   useEffect(() => {
-    fetch("http://localhost:3007/api/agents")
+    fetch("http://localhost:3001/api/agents")
       .then(res => res.json())
       .then(data => {
         const formatted = data.map((a: any) => ({

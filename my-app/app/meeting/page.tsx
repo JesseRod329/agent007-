@@ -104,7 +104,7 @@ export default function MeetingPage() {
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    fetch("http://localhost:3007/api/agents")
+    fetch("http://localhost:3001/api/agents")
       .then(res => res.json())
       .then(data => {
         const formatted = data.map((a: any) => ({
@@ -129,7 +129,7 @@ export default function MeetingPage() {
 
   // WebSocket for real-time agent responses
   useEffect(() => {
-    const ws = new WebSocket("ws://localhost:3007");
+    const ws = new WebSocket("ws://localhost:3001");
     ws.onmessage = (e) => {
       const data = JSON.parse(e.data);
       if (data.type === 'neural-event' && data.kind === 'agent-response') {
@@ -170,7 +170,7 @@ export default function MeetingPage() {
     for (const agentId of activeAgents) {
        // Only send to real agents (the ones from Clawdbot)
        if (realAgents.some(a => a.id === agentId)) {
-          fetch("http://localhost:3007/api/invoke", {
+          fetch("http://localhost:3001/api/invoke", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ agentId, message: messageToSend })
