@@ -22,8 +22,8 @@ app.prepare().then(() => {
     }
   });
 
-  // Create WebSocket server
-  const wss = new WebSocketServer({ server, path: '/' });
+  // Create WebSocket server with dedicated path
+  const wss = new WebSocketServer({ server, path: '/ws' });
 
   console.log('WebSocket server initialized');
 

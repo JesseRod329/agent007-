@@ -1,7 +1,7 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -29,6 +29,59 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 
+// Singleton WebSocket manager - persists across React re-renders
+let globalWs: WebSocket | null = null;
+let wsListeners: Set<(data: any) => void> = new Set();
+let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+
+function getWebSocket() {
+  if (globalWs && globalWs.readyState === WebSocket.OPEN) {
+    return globalWs;
+  }
+  
+  if (globalWs && globalWs.readyState === WebSocket.CONNECTING) {
+    return globalWs;
+  }
+  
+  // Create new connection to dedicated WebSocket path
+  globalWs = new WebSocket("ws://localhost:3001/ws");
+  
+  globalWs.onopen = () => {
+    console.log("WebSocket singleton connected");
+  };
+  
+  globalWs.onmessage = (e) => {
+    const data = JSON.parse(e.data);
+    wsListeners.forEach(listener => listener(data));
+  };
+  
+  globalWs.onclose = () => {
+    console.log("WebSocket singleton disconnected");
+    globalWs = null;
+    // Reconnect after 2 seconds
+    if (reconnectTimeout) clearTimeout(reconnectTimeout);
+    reconnectTimeout = setTimeout(() => {
+      if (wsListeners.size > 0) {
+        getWebSocket();
+      }
+    }, 2000);
+  };
+  
+  globalWs.onerror = (error) => {
+    console.error("WebSocket singleton error:", error);
+  };
+  
+  return globalWs;
+}
+
+function addWsListener(listener: (data: any) => void) {
+  wsListeners.add(listener);
+  getWebSocket(); // Ensure connection exists
+  return () => {
+    wsListeners.delete(listener);
+  };
+}
+
 interface Message {
   id: string;
   agentId: string;
@@ -55,35 +108,8 @@ const agents: Agent[] = [
   { id: "4", name: "Llama", role: "Coder", color: "#8b5cf6", status: "idle", avatar: "LL" },
 ];
 
-const initialMessages: Message[] = [
-  {
-    id: "1",
-    agentId: "1",
-    agentName: "Claude",
-    agentColor: "#f59e0b",
-    content: "I've analyzed the project requirements. We need to design a scalable architecture.",
-    timestamp: new Date(Date.now() - 1000 * 60 * 5),
-    type: "message",
-  },
-  {
-    id: "2",
-    agentId: "2",
-    agentName: "GPT-4",
-    agentColor: "#10b981",
-    content: "Agreed. I'll create a system design document with microservices architecture.",
-    timestamp: new Date(Date.now() - 1000 * 60 * 4),
-    type: "message",
-  },
-  {
-    id: "3",
-    agentId: "2",
-    agentName: "GPT-4",
-    agentColor: "#10b981",
-    content: "Thinking about database schema and API endpoints...",
-    timestamp: new Date(Date.now() - 1000 * 60 * 3),
-    type: "thought",
-  },
-];
+// Use empty initial messages to avoid hydration mismatch from Date.now()
+const initialMessages: Message[] = [];
 
 const responses = [
   "That's an interesting approach. Have we considered the edge cases?",
@@ -120,6 +146,12 @@ export default function MeetingPage() {
   }, []);
 
   const allAgents = [...realAgents, ...agents];
+  
+  // Keep a ref to allAgents for use in WebSocket handler without causing reconnects
+  const allAgentsRef = useRef(allAgents);
+  useEffect(() => {
+    allAgentsRef.current = allAgents;
+  }, [allAgents]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -127,27 +159,56 @@ export default function MeetingPage() {
     }
   }, [messages]);
 
-  // WebSocket for real-time agent responses
+  // WebSocket for real-time agent responses using singleton pattern
+  const streamingMessages = useRef<Record<string, { id: string; content: string }>>({});
+
   useEffect(() => {
-    const ws = new WebSocket("ws://localhost:3001");
-    ws.onmessage = (e) => {
-      const data = JSON.parse(e.data);
-      if (data.type === 'neural-event' && data.kind === 'agent-response') {
-        const agent = allAgents.find(a => a.id === data.agentId);
-        const newMessage: Message = {
-          id: Date.now().toString(),
-          agentId: data.agentId,
-          agentName: agent ? agent.name : data.agentId,
-          agentColor: agent ? agent.color : "#facc15",
-          content: data.text,
-          timestamp: new Date(),
-          type: "message",
-        };
-        setMessages((prev) => [...prev, newMessage]);
+    const handleWsMessage = (parsed: any) => {
+      // Handle streaming chunks
+      if (parsed.type === 'neural-event' && parsed.kind === 'agent-response') {
+        const { agentId, agentName, chunk } = parsed.data;
+        const agent = allAgentsRef.current.find(a => a.id === agentId);
+        
+        // Start or continue accumulating the message
+        if (!streamingMessages.current[agentId]) {
+          const messageId = Date.now().toString();
+          streamingMessages.current[agentId] = { id: messageId, content: chunk };
+          
+          // Add new message to state
+          const newMessage: Message = {
+            id: messageId,
+            agentId: agentId,
+            agentName: agent?.name || agentName || agentId,
+            agentColor: agent?.color || "#facc15",
+            content: chunk,
+            timestamp: new Date(),
+            type: "message",
+          };
+          setMessages((prev) => [...prev, newMessage]);
+        } else {
+          // Update existing message with new chunk
+          streamingMessages.current[agentId].content += chunk;
+          const messageId = streamingMessages.current[agentId].id;
+          const fullContent = streamingMessages.current[agentId].content;
+          
+          setMessages((prev) => 
+            prev.map(m => m.id === messageId ? { ...m, content: fullContent } : m)
+          );
+        }
+      }
+      
+      // Handle completion - clear streaming state for this agent
+      if (parsed.type === 'neural-event' && parsed.kind === 'agent-response-complete') {
+        const { agentId } = parsed.data;
+        delete streamingMessages.current[agentId];
       }
     };
-    return () => ws.close();
-  }, [allAgents]);
+    
+    // Use singleton WebSocket - survives React strict mode
+    const removeListener = addWsListener(handleWsMessage);
+    
+    return removeListener;
+  }, []);
 
   const handleSend = async () => {
     if (!inputValue.trim()) return;
